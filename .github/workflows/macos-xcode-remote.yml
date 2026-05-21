@@ -116,9 +116,8 @@ jobs:
       - name: 📥 Install Dependencies
         run: |
           echo "📥 Installing required packages..."
-          brew install --quiet node
-          pip3 install websockify numpy
-          echo "✅ Node.js and websockify installed"
+          pip3 install --break-system-packages websockify numpy || pip3 install websockify numpy || true
+          echo "✅ Dependencies installed"
 
       - name: 📥 Install noVNC
         run: |
@@ -138,6 +137,7 @@ jobs:
       # Step 3: Configure VNC Server
       # =====================================================================
       - name: 🖥️ Configure macOS Screen Sharing (VNC)
+        continue-on-error: true
         run: |
           echo "🖥️ Configuring VNC server..."
           
@@ -166,6 +166,7 @@ jobs:
           echo "✅ VNC server configured on port $VNC_PORT"
 
       - name: 📐 Set Screen Resolution
+        continue-on-error: true
         run: |
           RESOLUTION="${{ github.event.inputs.screen_resolution }}"
           WIDTH=$(echo $RESOLUTION | cut -d'x' -f1)
