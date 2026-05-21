@@ -88,7 +88,7 @@ jobs:
           echo "============================================"
 
       - name: 📦 Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 🔧 Select Xcode Version
         run: |
@@ -113,10 +113,12 @@ jobs:
       # =====================================================================
       # Step 2: Install Dependencies
       # =====================================================================
-      - name: 📥 Install Homebrew Dependencies
+      - name: 📥 Install Dependencies
         run: |
           echo "📥 Installing required packages..."
-          brew install --quiet node websockify
+          brew install --quiet node
+          pip3 install websockify numpy
+          echo "✅ Node.js and websockify installed"
 
       - name: 📥 Install noVNC
         run: |
@@ -186,21 +188,25 @@ jobs:
           echo "🌐 Starting websockify bridge..."
           cd $HOME/noVNC
           
-          # Start websockify to bridge WebSocket to VNC
-          ./utils/novnc_proxy \
-            --vnc localhost:$VNC_PORT \
-            --listen $NOVNC_PORT \
-            --web $HOME/noVNC \
-            &
+          # Try noVNC's built-in proxy first, fall back to standalone websockify
+          if [ -f ./utils/novnc_proxy ]; then
+            ./utils/novnc_proxy \
+              --vnc localhost:$VNC_PORT \
+              --listen $NOVNC_PORT \
+              --web $HOME/noVNC \
+              &
+          else
+            websockify --web=$HOME/noVNC $NOVNC_PORT localhost:$VNC_PORT &
+          fi
           
           PROXY_PID=$!
           echo "PROXY_PID=$PROXY_PID" >> $GITHUB_ENV
           
           # Wait for it to start
-          sleep 3
+          sleep 5
           
           # Verify
-          if curl -s -o /dev/null -w "%{http_code}" http://localhost:$NOVNC_PORT | grep -q "200\|301\|302"; then
+          if curl -s -o /dev/null -w "%{http_code}" http://localhost:$NOVNC_PORT | grep -qE "200|301|302"; then
             echo "✅ noVNC web interface running on port $NOVNC_PORT"
           else
             echo "⚠️ noVNC may not be fully ready yet, continuing..."
