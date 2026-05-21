@@ -142,26 +142,27 @@ jobs:
           echo "🖥️ Configuring VNC server..."
           
           VNC_PASS="${{ github.event.inputs.vnc_password }}"
-          VNC_USER="vncuser"
+          CURRENT_USER=$(whoami)
+          echo "Current user: $CURRENT_USER"
           
-          # Step 1: Create a dedicated macOS user with known password
-          echo "Creating VNC user account..."
-          sudo dscl . -create /Users/$VNC_USER
-          sudo dscl . -create /Users/$VNC_USER UserShell /bin/bash
-          sudo dscl . -create /Users/$VNC_USER RealName "VNC User"
-          sudo dscl . -create /Users/$VNC_USER UniqueID 550
-          sudo dscl . -create /Users/$VNC_USER PrimaryGroupID 20
-          sudo dscl . -create /Users/$VNC_USER NFSHomeDirectory /Users/$VNC_USER
-          sudo dscl . -passwd /Users/$VNC_USER "$VNC_PASS"
-          sudo dscl . -append /Groups/admin GroupMembership $VNC_USER
-          sudo createhomedir -c -u $VNC_USER 2>/dev/null || true
-          echo "✅ User '$VNC_USER' created"
+          # Step 1: Create VNC user with known password
+          echo "=== Creating VNC user ==="
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/bash
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 550
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 20
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
+          sudo dscl . -passwd /Users/vncuser "$VNC_PASS"
+          sudo dscl . -append /Groups/admin GroupMembership vncuser
+          sudo createhomedir -c -u vncuser 2>/dev/null || true
+          echo "✅ User 'vncuser' created with password"
           
-          # Also set password for runner user
+          # Also set password on runner
           sudo dscl . -passwd /Users/runner "$VNC_PASS" 2>/dev/null || true
           
-          # Step 2: Enable ARD + VNC legacy mode  
-          echo "Enabling Remote Management..."
+          # Step 2: Enable ARD with VNC
+          echo "=== Enabling Remote Management ==="
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -access -on \
@@ -169,18 +170,51 @@ jobs:
             -configure -restart -agent -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
             -configure -clientopts -setvncpw -vncpw "$VNC_PASS" \
-            2>&1 || true
+            2>&1 || echo "kickstart returned non-zero"
           
-          # Step 3: Enable Screen Sharing
-          echo "Enabling Screen Sharing service..."
-          sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
+          # Step 3: Try ALL methods to start Screen Sharing
+          echo "=== Starting Screen Sharing ==="
           
-          # Step 4: Verify
+          # Method 1: launchctl load
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || echo "load failed"
+          
+          # Method 2: launchctl enable + kickstart
+          sudo launchctl enable system/com.apple.screensharing 2>&1 || echo "enable failed"
+          sudo launchctl kickstart -kp system/com.apple.screensharing 2>&1 || echo "kickstart failed"
+          
+          # Method 3: open Remote Desktop preferences
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false 2>/dev/null || true
+          
+          # Method 4: Direct screensharingd launch
+          if [ -f /usr/libexec/screensharingd ]; then
+            echo "Found screensharingd, launching directly..."
+            sudo /usr/libexec/screensharingd 2>&1 &
+          fi
+          
+          # Wait for VNC to start
           sleep 5
-          echo "Checking VNC..."
-          lsof -i :5900 || echo "Port 5900 status check"
+          
+          # Step 4: Debug - show what's actually running
+          echo "=== DEBUG: VNC Process Check ==="
+          echo "Processes with 'screen' or 'vnc' or 'ard' or 'remote':"
+          ps aux | grep -iE 'screen|vnc|ard|remote' | grep -v grep || echo "No matching processes"
+          echo ""
+          echo "Port 5900 status:"
+          lsof -i :5900 2>&1 || echo "Port 5900 not listening"
+          echo ""
+          echo "LaunchDaemon status:"
+          sudo launchctl list | grep -iE 'screen|vnc|remote' || echo "No matching services"
+          
+          # Step 5: Retry if port 5900 not open
+          for i in 1 2 3; do
+            if lsof -i :5900 2>/dev/null | grep -q LISTEN; then
+              echo "✅ VNC server is LISTENING on port 5900!"
+              break
+            fi
+            echo "Retry $i: VNC not on 5900 yet, waiting..."
+            sudo launchctl kickstart -kp system/com.apple.screensharing 2>/dev/null || true
+            sleep 5
+          done
           
           echo ""
           echo "╔════════════════════════════════════╗"
@@ -421,15 +455,22 @@ jobs:
             
             # Health checks every 5 minutes
             if [ $((COUNTER % 1)) -eq 0 ]; then
-              # Check VNC
-              if ! pgrep -x "screensharingd" > /dev/null 2>&1; then
-                echo "[$(date '+%H:%M:%S')] ⚠️ VNC process not found, attempting restart..."
-                sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+              # Check VNC - look for ANY related process
+              if ! lsof -i :5900 2>/dev/null | grep -q LISTEN; then
+                echo "[$(date '+%H:%M:%S')] ⚠️ VNC port 5900 not listening, attempting restart..."
+                sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+                  -activate -configure -access -on -configure -allowAccessFor -allUsers \
+                  -configure -restart -agent -privs -all \
+                  -configure -clientopts -setvnclegacy -vnclegacy yes 2>/dev/null || true
+                sudo launchctl kickstart -kp system/com.apple.screensharing 2>/dev/null || true
+                if [ -f /usr/libexec/screensharingd ]; then
+                  sudo /usr/libexec/screensharingd 2>/dev/null &
+                fi
               fi
               
               # Check cloudflared
               if ! kill -0 $TUNNEL_PID 2>/dev/null; then
-                echo "[$(date '+%H:%M:%S')] ⚠️ Tunnel process died, attempting restart..."
+                echo "[$(date '+%H:%M:%S')] ⚠️ Tunnel process died, restarting..."
                 cloudflared tunnel --no-autoupdate --url http://localhost:$NOVNC_PORT \
                   --logfile $HOME/cloudflared.log &
                 TUNNEL_PID=$!
