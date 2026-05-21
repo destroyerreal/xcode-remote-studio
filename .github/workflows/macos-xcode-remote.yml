@@ -137,25 +137,30 @@ jobs:
       # Step 3: Configure VNC Server
       # =====================================================================
       - name: 🖥️ Configure macOS Screen Sharing (VNC)
-        continue-on-error: true
         run: |
           set +e
           echo "🖥️ Configuring VNC server..."
           
           VNC_PASS="${{ github.event.inputs.vnc_password }}"
-          CURRENT_USER=$(whoami)
-          echo "Current user: $CURRENT_USER"
+          VNC_USER="vncuser"
           
-          # Step 1: Set macOS user password (try multiple methods)
-          echo "Setting user password..."
-          # Method A: sysadminctl (works on modern macOS)
-          sudo sysadminctl -resetPasswordFor "$CURRENT_USER" -newPassword "$VNC_PASS" 2>&1 || true
-          # Method B: dscl create password
-          sudo dscl . -passwd "/Users/$CURRENT_USER" "$VNC_PASS" 2>&1 || true
-          # Method C: dscl with empty old password
-          sudo dscl . -passwd "/Users/$CURRENT_USER" "" "$VNC_PASS" 2>&1 || true
+          # Step 1: Create a dedicated macOS user with known password
+          echo "Creating VNC user account..."
+          sudo dscl . -create /Users/$VNC_USER
+          sudo dscl . -create /Users/$VNC_USER UserShell /bin/bash
+          sudo dscl . -create /Users/$VNC_USER RealName "VNC User"
+          sudo dscl . -create /Users/$VNC_USER UniqueID 550
+          sudo dscl . -create /Users/$VNC_USER PrimaryGroupID 20
+          sudo dscl . -create /Users/$VNC_USER NFSHomeDirectory /Users/$VNC_USER
+          sudo dscl . -passwd /Users/$VNC_USER "$VNC_PASS"
+          sudo dscl . -append /Groups/admin GroupMembership $VNC_USER
+          sudo createhomedir -c -u $VNC_USER 2>/dev/null || true
+          echo "✅ User '$VNC_USER' created"
           
-          # Step 2: Enable ARD + VNC legacy mode
+          # Also set password for runner user
+          sudo dscl . -passwd /Users/runner "$VNC_PASS" 2>/dev/null || true
+          
+          # Step 2: Enable ARD + VNC legacy mode  
           echo "Enabling Remote Management..."
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
@@ -170,20 +175,23 @@ jobs:
           echo "Enabling Screen Sharing service..."
           sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
           
           # Step 4: Verify
-          sleep 3
+          sleep 5
           echo "Checking VNC..."
-          lsof -i :5900 2>/dev/null || echo "Port 5900 not open yet"
-          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
-          sleep 2
-          lsof -i :5900 2>/dev/null || echo "⚠️ VNC may not be available"
+          lsof -i :5900 || echo "Port 5900 status check"
           
           echo ""
-          echo "📋 VNC Credentials:"
-          echo "   Username: $CURRENT_USER"
-          echo "   Password: $VNC_PASS"
-          echo "✅ VNC configuration complete"
+          echo "╔════════════════════════════════════╗"
+          echo "║      📋 VNC LOGIN CREDENTIALS      ║"
+          echo "╠════════════════════════════════════╣"
+          echo "║  Username: vncuser                 ║"
+          echo "║  Password: $VNC_PASS               ║"
+          echo "║  -- OR --                          ║"
+          echo "║  Username: runner                  ║"
+          echo "║  Password: $VNC_PASS               ║"
+          echo "╚════════════════════════════════════╝"
 
       - name: 📐 Set Screen Resolution
         continue-on-error: true
@@ -377,20 +385,18 @@ jobs:
       # =====================================================================
       - name: 📊 Display Session Summary
         run: |
+          XCODE_VER=$(xcodebuild -version 2>/dev/null | head -1 || echo 'N/A')
           echo ""
           echo "╔══════════════════════════════════════════════════════════╗"
           echo "║        🖥️  Xcode Remote Studio - SESSION ACTIVE         ║"
           echo "╠══════════════════════════════════════════════════════════╣"
           echo "║                                                          ║"
-          echo "║  🌐 Tunnel URL: ${TUNNEL_URL:-'Check tunnel logs'}       ║"
-          echo "║  🔑 VNC Pass:   ${{ github.event.inputs.vnc_password }}  ║"
-          echo "║  📱 Xcode:      $(xcodebuild -version | head -1)        ║"
-          echo "║  🍎 macOS:      $(sw_vers -productVersion)              ║"
-          echo "║  📐 Resolution: ${{ github.event.inputs.screen_resolution }} ║"
-          echo "║  ⏱️  Duration:   ${{ github.event.inputs.session_duration }}h ║"
-          echo "║                                                          ║"
-          echo "║  📁 Projects:   ~/Desktop/XcodeProjects                  ║"
-          echo "║  📝 New Project: ~/Desktop/create_ios_project.sh         ║"
+          echo "║  🌐 Tunnel: ${TUNNEL_URL:-'Check tunnel logs'}           ║"
+          echo "║  🔑 VNC User: vncuser / runner                           ║"
+          echo "║  🔑 VNC Pass: ${{ github.event.inputs.vnc_password }}    ║"
+          echo "║  📱 Xcode:   $XCODE_VER                                  ║"
+          echo "║  🍎 macOS:   $(sw_vers -productVersion)                  ║"
+          echo "║  ⏱️  Duration: ${{ github.event.inputs.session_duration }}h ║"
           echo "║                                                          ║"
           echo "╚══════════════════════════════════════════════════════════╝"
           echo ""
